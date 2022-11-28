@@ -13,6 +13,8 @@
 
 #include <Kokkos_Core.hpp>
 #include <Kokkos_StdAlgorithms.hpp>
+#include <Omega_h_box.hpp>
+#include <Omega_h_build.hpp>
 
 // In ArborX terminology:
 // primative = triangle
@@ -91,7 +93,7 @@ template <typename DeviceType>
 class Points
 {
 public:
-  Points(typename DeviceType::execution_space const &execution_space)
+  Points(typename DeviceType::execution_space const &execution_space) /* TODO seed and rand */
   {
     float Lx = 100.0;
     float Ly = 100.0;
@@ -180,6 +182,31 @@ public:
     }
     Kokkos::deep_copy(execution_space, triangles_, triangles_host);
     Kokkos::deep_copy(execution_space, mappings_, mappings_host);
+  }
+
+  Triangles(Omega_h::Mesh &mesh, typename DeviceType::execution_space const &execution_space):
+    triangles_{Kokkos::View<Triangle *, typename DeviceType::memory_space>(
+      Kokkos::view_alloc(Kokkos::WithoutInitializing, "triangles"), mesh.nelems())},
+    mappings_{Kokkos::View<Mapping *, typename DeviceType::memory_space>(
+      Kokkos::view_alloc(Kokkos::WithoutInitializing, "mappings"), mesh.nelems())}
+  {
+    auto tris2verts{mesh.ask_elem_verts()};
+    auto coords{mesh.coords()};
+
+    Kokkos::parallel_for(mesh.nelems(),
+      [this, tris2verts, coords] KOKKOS_FUNCTION (Omega_h::LO elem_idx) {
+        const auto elem_tri2verts = Omega_h::gather_verts<3>(tris2verts, elem_idx);
+        // 2d mesh with 2d coords, but 3 triangles
+        const auto vertex_coords = Omega_h::gather_vectors<3, 2>(coords, elem_tri2verts);
+        Triangle tri{
+          ArborX::Point{vertex_coords[0][0], vertex_coords[0][1], 0.},
+          ArborX::Point{vertex_coords[1][0], vertex_coords[1][1], 0.},
+          ArborX::Point{vertex_coords[2][0], vertex_coords[2][1], 0.}
+        };
+        triangles_(elem_idx) = tri;
+        mappings_(elem_idx).compute(tri);
+      }
+    );
   }
 
   // Return the number of triangles.
@@ -277,7 +304,12 @@ int main()
     ExecutionSpace execution_space;
 
     std::cout << "Create grid with triangles.\n";
-    Triangles<DeviceType> triangles(execution_space);
+    
+    auto lib = Omega_h::Library{};
+    auto world = lib.world();
+    auto mesh =
+      Omega_h::build_box(world, OMEGA_H_SIMPLEX, 1, 1, 1, 10, 10, 0, false);
+    Triangles<DeviceType> triangles{mesh, execution_space};
     std::cout << "Triangles set up.\n";
 
     std::cout << "Creating BVH tree.\n";
