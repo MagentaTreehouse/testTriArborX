@@ -62,6 +62,7 @@ struct Mapping
   //   = (1-beta-alpha) * a + alpha * b + beta * c
   //
   // FIXME Only works for 2D reliably
+  KOKKOS_FUNCTION
   void compute(const Triangle &triangle)
   {
     const auto &a = triangle.a;
@@ -129,6 +130,19 @@ template <typename DeviceType>
 class Triangles
 {
 public:
+  KOKKOS_FUNCTION
+  void operator()(Omega_h::LO elem_idx) const {
+    const auto elem_tri2verts = Omega_h::gather_verts<3>(tris2verts, elem_idx);
+    // 2d mesh with 2d coords, but 3 triangles
+    const auto vertex_coords = Omega_h::gather_vectors<3, 2>(coords, elem_tri2verts);
+    Triangle tri{
+      ArborX::Point{static_cast<float>(vertex_coords[0][0]), static_cast<float>(vertex_coords[0][1]), 0.f},
+      ArborX::Point{static_cast<float>(vertex_coords[1][0]), static_cast<float>(vertex_coords[1][1]), 0.f},
+      ArborX::Point{static_cast<float>(vertex_coords[2][0]), static_cast<float>(vertex_coords[2][1]), 0.f}
+    };
+    triangles_(elem_idx) = tri;
+    mappings_(elem_idx).compute(tri);
+  }
   // Create non-intersecting triangles on a 3D cartesian grid
   // used both for queries and predicates.
   Triangles(typename DeviceType::execution_space const &execution_space)
@@ -188,25 +202,16 @@ public:
     triangles_{Kokkos::View<Triangle *, typename DeviceType::memory_space>(
       Kokkos::view_alloc(Kokkos::WithoutInitializing, "triangles"), mesh.nelems())},
     mappings_{Kokkos::View<Mapping *, typename DeviceType::memory_space>(
-      Kokkos::view_alloc(Kokkos::WithoutInitializing, "mappings"), mesh.nelems())}
+      Kokkos::view_alloc(Kokkos::WithoutInitializing, "mappings"), mesh.nelems())},
+    tris2verts{mesh.ask_elem_verts()},
+    coords{mesh.coords()}
   {
     auto tris2verts{mesh.ask_elem_verts()};
     auto coords{mesh.coords()};
+    auto local_triangles{triangles_};
+    auto local_mappings{mappings_};
 
-    Kokkos::parallel_for(mesh.nelems(),
-      [this, tris2verts, coords] KOKKOS_FUNCTION (Omega_h::LO elem_idx) {
-        const auto elem_tri2verts = Omega_h::gather_verts<3>(tris2verts, elem_idx);
-        // 2d mesh with 2d coords, but 3 triangles
-        const auto vertex_coords = Omega_h::gather_vectors<3, 2>(coords, elem_tri2verts);
-        Triangle tri{
-          ArborX::Point{vertex_coords[0][0], vertex_coords[0][1], 0.},
-          ArborX::Point{vertex_coords[1][0], vertex_coords[1][1], 0.},
-          ArborX::Point{vertex_coords[2][0], vertex_coords[2][1], 0.}
-        };
-        triangles_(elem_idx) = tri;
-        mappings_(elem_idx).compute(tri);
-      }
-    );
+    Kokkos::parallel_for(mesh.nelems(), *this);
   }
 
   // Return the number of triangles.
@@ -223,9 +228,10 @@ public:
     return mappings_(i);
   }
 
-private:
   Kokkos::View<Triangle *, typename DeviceType::memory_space> triangles_;
   Kokkos::View<Mapping *, typename DeviceType::memory_space> mappings_;
+  Omega_h::LOs tris2verts;
+  Omega_h::Reals coords;
 };
 
 // For creating the bounding volume hierarchy given a Triangles object, we
@@ -348,8 +354,8 @@ int main()
     Kokkos::deep_copy(indices_gold_d, indices_gold_h);
     Kokkos::deep_copy(offsets_gold_d, offsets_gold_h);
     namespace KE = Kokkos::Experimental;
-    assert(KE::equal(ExecutionSpace{},indices,indices_gold_d));
-    assert(KE::equal(ExecutionSpace{},offsets,offsets_gold_d));
+    assert(KE::equal(ExecutionSpace{}, indices,indices_gold_d));
+    assert(KE::equal(ExecutionSpace{}, offsets,offsets_gold_d));
   }
   Kokkos::finalize();
 }
