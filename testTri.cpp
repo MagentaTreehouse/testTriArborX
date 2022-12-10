@@ -15,6 +15,7 @@
 #include <Kokkos_StdAlgorithms.hpp>
 #include <Omega_h_box.hpp>
 #include <Omega_h_build.hpp>
+#include <Omega_h_bbox.hpp>
 
 // In ArborX terminology:
 // primative = triangle
@@ -143,6 +144,7 @@ public:
     triangles_(elem_idx) = tri;
     mappings_(elem_idx).compute(tri);
   }
+
   // Create non-intersecting triangles on a 3D cartesian grid
   // used both for queries and predicates.
   Triangles(typename DeviceType::execution_space const &execution_space)
@@ -208,9 +210,6 @@ public:
   {
     auto tris2verts{mesh.ask_elem_verts()};
     auto coords{mesh.coords()};
-    auto local_triangles{triangles_};
-    auto local_mappings{mappings_};
-
     Kokkos::parallel_for(mesh.nelems(), *this);
   }
 
@@ -310,26 +309,27 @@ int main()
     ExecutionSpace execution_space;
 
     std::cout << "Create grid with triangles.\n";
-    
+
     auto lib = Omega_h::Library{};
     auto world = lib.world();
     auto mesh =
       Omega_h::build_box(world, OMEGA_H_SIMPLEX, 1, 1, 1, 10, 10, 0, false);
+    auto bbox = Omega_h::get_bounding_box<2>(&mesh);
     Triangles<DeviceType> triangles{mesh, execution_space};
-    std::cout << "Triangles set up.\n";
+    // std::cout << "Triangles set up.\n";
 
-    std::cout << "Creating BVH tree.\n";
-    ArborX::BVH<MemorySpace> const tree(execution_space, triangles);
-    std::cout << "BVH tree set up.\n";
+    // std::cout << "Creating BVH tree.\n";
+    ArborX::BVH<MemorySpace> const tree(execution_space, triangles); /* #1 */
+    // std::cout << "BVH tree set up.\n";
 
-    std::cout << "Create the points used for queries.\n";
+    // std::cout << "Create the points used for queries.\n";
     Points<DeviceType> points(execution_space);
-    std::cout << "Points for queries set up.\n";
+    // std::cout << "Points for queries set up.\n";
 
-    std::cout << "Starting the queries.\n";
+    // std::cout << "Starting the queries.\n";
     int const n = points.size();
-    std::cout << "number of points " << points.size()
-              << " number of triangles " << triangles.size() << "\n";
+    // std::cout << "number of points " << points.size()
+    //           << " number of triangles " << triangles.size() << "\n";
     //'indices' and 'offsets' define a CSR indicating which
     //triangle (index[i]) each point exists within.
     //indices contains triangle ids.
@@ -342,20 +342,20 @@ int main()
     Kokkos::View<int *, MemorySpace> offsets("offsets", 0);
 
     ArborX::query(tree, execution_space, points,
-        TriangleIntersectionCallback{triangles}, indices, offsets);
+        TriangleIntersectionCallback{triangles}, indices, offsets); /* #3 */
     std::cout << "Queries done.\n";
-    auto indices_gold = std::vector{1,7};
-    auto offsets_gold = std::vector{0, 1, 2, 2, 2, 2, 2, 2, 2};
-    using KkIntViewUnmanaged = Kokkos::View<int *, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
-    KkIntViewUnmanaged indices_gold_h(indices_gold.data(), indices_gold.size());
-    KkIntViewUnmanaged offsets_gold_h(offsets_gold.data(), offsets_gold.size());
-    Kokkos::View<int*, MemorySpace> indices_gold_d("indices_gold_d",indices_gold.size());
-    Kokkos::View<int*, MemorySpace> offsets_gold_d("offsets_gold_d", offsets_gold.size());
-    Kokkos::deep_copy(indices_gold_d, indices_gold_h);
-    Kokkos::deep_copy(offsets_gold_d, offsets_gold_h);
-    namespace KE = Kokkos::Experimental;
-    assert(KE::equal(ExecutionSpace{}, indices,indices_gold_d));
-    assert(KE::equal(ExecutionSpace{}, offsets,offsets_gold_d));
+    // auto indices_gold = std::vector{1,7};
+    // auto offsets_gold = std::vector{0, 1, 2, 2, 2, 2, 2, 2, 2};
+    // using KkIntViewUnmanaged = Kokkos::View<int *, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+    // KkIntViewUnmanaged indices_gold_h(indices_gold.data(), indices_gold.size());
+    // KkIntViewUnmanaged offsets_gold_h(offsets_gold.data(), offsets_gold.size());
+    // Kokkos::View<int*, MemorySpace> indices_gold_d("indices_gold_d",indices_gold.size());
+    // Kokkos::View<int*, MemorySpace> offsets_gold_d("offsets_gold_d", offsets_gold.size());
+    // Kokkos::deep_copy(indices_gold_d, indices_gold_h);
+    // Kokkos::deep_copy(offsets_gold_d, offsets_gold_h);
+    // namespace KE = Kokkos::Experimental;
+    // assert(KE::equal(ExecutionSpace{}, indices, indices_gold_d));
+    // assert(KE::equal(ExecutionSpace{}, offsets, offsets_gold_d));
   }
   Kokkos::finalize();
 }
