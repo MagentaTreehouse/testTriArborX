@@ -8,11 +8,16 @@
  *                                                                          *
  * SPDX-License-Identifier: BSD-3-Clause                                    *
  ****************************************************************************/
+#include <iostream>
+#include <cstdint>
+#include <cstdlib>
+#include <chrono>
+#include <random>
 
 #include <ArborX.hpp>
-
 #include <Kokkos_Core.hpp>
 #include <Kokkos_StdAlgorithms.hpp>
+#include <Omega_h_file.hpp>
 #include <Omega_h_box.hpp>
 #include <Omega_h_build.hpp>
 #include <Omega_h_bbox.hpp>
@@ -94,8 +99,10 @@ struct Mapping
 template <typename DeviceType>
 class Points
 {
+  using DeviceExecSpace = typename DeviceType::execution_space;
+  using DeviceMemSpace = typename DeviceType::memory_space;
 public:
-  Points(typename DeviceType::execution_space const &execution_space) /* TODO seed and rand */
+  Points(DeviceExecSpace const &execution_space)
   {
     float Lx = 100.0;
     float Ly = 100.0;
@@ -107,7 +114,7 @@ public:
 
     auto index = [nx, ny](int i, int j) { return i + j * nx; };
 
-    points_ = Kokkos::View<ArborX::Point *, typename DeviceType::memory_space>("points", 2 * n);
+    points_ = Kokkos::View<ArborX::Point *, DeviceMemSpace>("points", 2 * n);
     auto points_host = Kokkos::create_mirror_view(points_);
 
     for (int i = 0; i < nx; ++i)
@@ -119,12 +126,16 @@ public:
     Kokkos::deep_copy(execution_space, points_, points_host);
   }
 
+  Points(Kokkos::View<ArborX::Point *, DeviceMemSpace> points):
+    points_(points)
+  {}
+
   KOKKOS_FUNCTION auto const &get_point(int i) const { return points_(i); }
 
   KOKKOS_FUNCTION auto size() const { return points_.size(); }
 
 private:
-  Kokkos::View<ArborX::Point *, typename DeviceType::memory_space> points_;
+  Kokkos::View<ArborX::Point *, DeviceMemSpace> points_;
 };
 
 template <typename DeviceType>
@@ -299,35 +310,55 @@ private:
   Triangles<DeviceType> triangles_;
 };
 
-int main()
+int main(int argc, char **argv)
 {
-  Kokkos::initialize();
+  Kokkos::initialize(argc, argv);
   {
     using ExecutionSpace = Kokkos::DefaultExecutionSpace;
     using MemorySpace = typename ExecutionSpace::memory_space;
     using DeviceType = Kokkos::Device<ExecutionSpace, MemorySpace>;
     ExecutionSpace execution_space;
 
-    std::cout << "Create grid with triangles.\n";
+    static constexpr std::size_t default_n_points = 256;
+    static constexpr std::uint_fast32_t default_rand_seed = 42;
 
-    auto lib = Omega_h::Library{};
-    auto world = lib.world();
-    auto mesh =
-      Omega_h::build_box(world, OMEGA_H_SIMPLEX, 1, 1, 1, 10, 10, 0, false);
+    if (argc < 3)
+      std::exit(1);
+    Omega_h::Library lib{};
+    Omega_h::Mesh mesh{&lib};
+    Omega_h::binary::read(argv[1], lib.world(), &mesh);
+    auto n_points = argc < 3 ? default_n_points : std::atoi(argv[2]);
+    auto rand_seed = argc < 4 ? default_rand_seed : std::atoi(argv[3]);
+
     auto bbox = Omega_h::get_bounding_box<2>(&mesh);
+    std::mt19937 gen{rand_seed};
+    std::uniform_real_distribution<float>
+      random_x{static_cast<float>(bbox.min[0]), static_cast<float>(bbox.max[0])},
+      random_y{static_cast<float>(bbox.min[1]), static_cast<float>(bbox.max[1])};
+    Kokkos::View<ArborX::Point *> points_view("test_points", n_points);
+    auto points_h = Kokkos::create_mirror_view(points_view);
+    for (std::size_t i = 0; i < n_points; ++i)
+      points_h(i) = {random_x(gen), random_y(gen), 0.f};
+
+    // std::cout << "Create grid with triangles.\n";
     Triangles<DeviceType> triangles{mesh, execution_space};
     // std::cout << "Triangles set up.\n";
 
+    using std::chrono::steady_clock;
+    steady_clock::time_point t[5];
+    // start
+    t[0] = steady_clock::now();
     // std::cout << "Creating BVH tree.\n";
     ArborX::BVH<MemorySpace> const tree(execution_space, triangles); /* #1 */
     // std::cout << "BVH tree set up.\n";
-
+    t[1] = steady_clock::now();
     // std::cout << "Create the points used for queries.\n";
-    Points<DeviceType> points(execution_space);
+    Kokkos::deep_copy(execution_space, points_view, points_h);
+    Points<DeviceType> points(points_view);
     // std::cout << "Points for queries set up.\n";
-
+    t[2] = steady_clock::now();
     // std::cout << "Starting the queries.\n";
-    int const n = points.size();
+    // int const n = points.size();
     // std::cout << "number of points " << points.size()
     //           << " number of triangles " << triangles.size() << "\n";
     //'indices' and 'offsets' define a CSR indicating which
@@ -343,7 +374,8 @@ int main()
 
     ArborX::query(tree, execution_space, points,
         TriangleIntersectionCallback{triangles}, indices, offsets); /* #3 */
-    std::cout << "Queries done.\n";
+    // std::cout << "Queries done.\n";
+    t[3] = steady_clock::now();
     // auto indices_gold = std::vector{1,7};
     // auto offsets_gold = std::vector{0, 1, 2, 2, 2, 2, 2, 2, 2};
     // using KkIntViewUnmanaged = Kokkos::View<int *, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
@@ -356,6 +388,20 @@ int main()
     // namespace KE = Kokkos::Experimental;
     // assert(KE::equal(ExecutionSpace{}, indices, indices_gold_d));
     // assert(KE::equal(ExecutionSpace{}, offsets, offsets_gold_d));
+    auto indices_h = Kokkos::create_mirror_view(indices);
+    Kokkos::deep_copy(indices_h, indices);
+    auto offsets_h = Kokkos::create_mirror_view(offsets);
+    Kokkos::deep_copy(offsets_h, offsets);
+    t[4] = steady_clock::now();
+
+    auto search_structure_construction_time = t[1] - t[0];
+    auto points_copy_time = (t[2] - t[1]) + (t[4] - t[3]);
+    auto search_time = t[3] - t[2];
+
+    std::cout
+      << search_structure_construction_time.count() << '\n'
+      << points_copy_time.count() << '\n'
+      << search_time.count() << std::endl;
   }
   Kokkos::finalize();
 }
